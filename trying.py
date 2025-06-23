@@ -19,7 +19,7 @@ def parse_dag_file(dag_file_path):
     tasks = {}
     edges = {}
     file_sizes = {}
-    
+
     # Read the DAG file
     with open(dag_file_path, 'r') as f:
         lines = f.readlines()
@@ -32,7 +32,7 @@ def parse_dag_file(dag_file_path):
             file_size = int(parts[2]) / (1024 * 1024)  # Convert bytes to MB
             file_size=round(file_size,2)
             file_sizes[file_name] = file_size
-    
+
     # Parse tasks
     for line in lines:
         if line.startswith('TASK'):
@@ -166,8 +166,93 @@ def LeaseVM(resource_pool, budget):
 
     return M
     
-def BuildSolution( Tasks, Edges, M,P0)
-    return 0
+
+def BuildSolution(Tasks, Edges, M, P0):
+    """
+    Implements Algorithm 3: BuildSolution from PACP-HEFT paper.
+    Args:
+        Tasks: Dictionary of task_id -> Task object
+        Edges: Dictionary of task_id -> {parent_id: data_size}
+        M: Dictionary of VM type_id -> number of leased intervals
+        P: Dictionary of task_id -> priority rank (lower value = higher priority)
+
+    Returns:
+        S: Tuple (M, AL) where AL is list of (task_id, vm, ST, FT)
+    """
+    # Step 1: Sort all tasks according to priority P0
+    sorted_tasks = sorted(P0.items(), key=lambda x: x[1])  # ascending order
+    sorted_task_ids = [tid for tid, _ in sorted_tasks]
+
+    AL = []  # Assignments: (task_id, vm, ST, FT)
+    vm_instances = {}  # vm_type -> list of VM instances (each is a dict with its own task schedule)
+
+    # Initialize VM instances
+    for vm_type, count in M.items():
+        vm_instances[vm_type] = []
+        for i in range(count):
+            vm_instances[vm_type].append({
+                "tasks": [],  # scheduled tasks
+                "MST": 0,     # lease start
+                "MFT": 0      # lease finish
+            })
+
+    def compute_EST(task_id, vm):
+        preds = Tasks[task_id].predecessors
+        if not preds:
+            return vm['MFT']  # No parent; can start anytime
+        max_parent_ft = 0
+        for parent in preds:
+            parent_ft = next((x[3] for x in AL if x[0] == parent), 0)
+            comm_cost = Edges.get(task_id, {}).get(parent, 0) / bandwidth
+            max_parent_ft = max(max_parent_ft, parent_ft + comm_cost)
+        return max(max_parent_ft, vm['MFT'])
+
+    # Step 2: Loop over each task
+    for task_id in sorted_task_ids:
+        task = Tasks[task_id]
+        best_vm = None
+        best_ft = float('inf')
+        best_instance = None
+        no_extra_cost_vms = []
+
+        for vm_type in M:
+            for vm in vm_instances[vm_type]:
+                est = compute_EST(task_id, vm)
+                et = task.size / [v.processing_capacity for v in resource_pool if v.type_id == vm_type][0]
+                ft = est + et
+                duration = ft - vm['MST']
+                intervals_needed = math.ceil(duration / 60)
+                vm_leased_intervals = M[vm_type]
+
+                if intervals_needed <= vm_leased_intervals:
+                    no_extra_cost_vms.append((ft, vm, vm_type))
+
+                # Track VM with min FT
+                if ft < best_ft:
+                    best_ft = ft
+                    best_vm = vm
+                    best_instance = vm_type
+
+        # Select the best VM
+        if no_extra_cost_vms:
+            # Choose VM with minimum FT among no-extra-cost VMs
+            selected_ft, selected_vm, selected_type = min(no_extra_cost_vms, key=lambda x: x[0])
+        else:
+            selected_ft = best_ft
+            selected_vm = best_vm
+            selected_type = best_instance
+
+        # Assign task
+        et = task.size / [v.processing_capacity for v in resource_pool if v.type_id == selected_type][0]
+        st = selected_ft - et
+        selected_vm['tasks'].append((task_id, st, selected_ft))
+        selected_vm['MFT'] = max(selected_vm['MFT'], selected_ft)
+        selected_vm['MST'] = min(selected_vm['MST'], st) if selected_vm['tasks'] else st
+
+        AL.append((task_id, selected_type, st, selected_ft))
+
+    return (M, AL)
+    
     
 def Priority1(T,E,S0):
     return 0
@@ -176,60 +261,74 @@ def Priority2(T,E,S1):
 def CriticalTaskOptimizer(S2):
     return 0  
     
-def best():
-    # Comparison Logic
-#Both Feasible: If $ WSC_s1 \leq B $ and $ WSC_s2 \leq B $, return the solution with the lower $ WST $.
-#Both Infeasible: If $ WSC_s1 > B $ and $ WSC_s2 > B $, return the solution with the lower $ WSC $.
-#One Feasible: If only one solution is feasible, return the feasible one (the infeasible one is discarded).
+# def best():
+#     # Comparison Logic
+# #Both Feasible: If $ WSC_s1 \leq B $ and $ WSC_s2 \leq B $, return the solution with the lower $ WST $.
+# #Both Infeasible: If $ WSC_s1 > B $ and $ WSC_s2 > B $, return the solution with the lower $ WSC $.
+# #One Feasible: If only one solution is feasible, return the feasible one (the infeasible one is discarded).
 
-    # Determine the best solution
-    s1_feasible = wsc_s1 <= budget
-    s2_feasible = wsc_s2 <= budget
+#     # Determine the best solution
+#     s1_feasible = wsc_s1 <= budget
+#     s2_feasible = wsc_s2 <= budget
 
-    if s1_feasible and s2_feasible:
-        return (tasks_s1, vms_s1) if wst_s1 <= wst_s2 else (tasks_s2, vms_s2)
-    elif not s1_feasible and not s2_feasible:
-        return (tasks_s1, vms_s1) if wsc_s1 < wsc_s2 else (tasks_s2, vms_s2)
-    elif not s1_feasible:
-        return (tasks_s2, vms_s2)  # S2 is feasible, so it's better
-    else:  # s2_feasible is False
-        return (tasks_s1, vms_s1)  # S1 is feasible, so it's better
-    return 0    
-    
+#         # Determine the best solution
+#     s1_feasible = wsc_s1 <= budget
+#     s2_feasible = wsc_s2 <= budget
+
+#     if s1_feasible and s2_feasible:
+#         return (tasks_s1, vms_s1) if wst_s1 <= wst_s2 else (tasks_s2, vms_s2)
+#     elif not s1_feasible and not s2_feasible:
+#         return (tasks_s1, vms_s1) if wsc_s1 < wsc_s2 else (tasks_s2, vms_s2)
+#     elif not s1_feasible:
+#         return (tasks_s2, vms_s2)  # S2 is feasible, so it's better
+#     else:  # s2_feasible is False
+#         return (tasks_s1, vms_s1)  # S1 is feasible, so it's better
+
+#     return 0    
+
 def PACP_HEFT(T,E,R,B):
     RTL=rtl(R)
     S={}
-    while RTL :
-        M=LeaseVM(RTL,B)
-        P0=InitializePriority(T,E,R,B)
-        S0=BuildSolution(T,E,M,P0)
-        better=True
-        while better:
-            P1=Priority1(T,E,S0)
-            S1=best(S0,BuildSolution(P1))
-            if S1 better than S0 :
-                S0=S1
-                continue
-            P2=Priority2(T,E,S1)
-            S2=best(S1,BuildSolution(P2))
-            if S2 better than S0:
-                S0=S2
-                continue
-            S3=best(S2,CriticalTaskOptimizer(S2))
-            if S3 better than S0:
-                S0=S3
-                continue
-            better=False
-        S=best(S0,S)
-        RTL=RTL[1:]
+    
+    M=LeaseVM(RTL,B)
+    P0=InitializePriority(T,E,R,B)
+    S0=BuildSolution(T,E,M,P0)  
+    print(S0)
+
+
+# def PACP_HEFT(T,E,R,B):
+#     RTL=rtl(R)
+#     S={}
+#     while RTL :
+#         M=LeaseVM(RTL,B)
+#         P0=InitializePriority(T,E,R,B)
+#         S0=BuildSolution(T,E,M,P0)
+#         better=True
+#         while better:
+#             P1=Priority1(T,E,S0)
+#             S1=best(S0,BuildSolution(P1))
+#             if S1 better than S0 :
+#                 S0=S1
+#                 continue
+#             P2=Priority2(T,E,S1)
+#             S2=best(S1,BuildSolution(P2))
+#             if S2 better than S0:
+#                 S0=S2
+#                 continue
+#             S3=best(S2,CriticalTaskOptimizer(S2))
+#             if S3 better than S0:
+#                 S0=S3
+#                 continue
+#             better=False
+#         S=best(S0,S)
+#         RTL=RTL[1:]
         
-        
-    return S
+#     return S
     
 
 
 if __name__ == "__main__":
-    dag_file_path = "CYBERSHAKE.n.50.11.dag"  # Ensure this file exists in the directory
+    dag_file_path = "CYBERSHAKE.n.50.0.dag"  # Ensure this file exists in the directory
     budget = 9  # Adjusted for CyberShake
     #time_interval = 60  # Billing interval in minutes, here constant so defined in LeaseVM function
     bandwidth = 20  # MB/s
