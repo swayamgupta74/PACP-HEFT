@@ -249,23 +249,78 @@ def BuildSolution(Tasks, Edges, M, P0):
         selected_vm['MFT'] = max(selected_vm['MFT'], selected_ft)
         selected_vm['MST'] = min(selected_vm['MST'], st) if selected_vm['tasks'] else st
 
-        AL.append((task_id, selected_type, st, selected_ft))
+        AL.append((task_id, selected_type, round(st,2) , round(selected_ft,2)))
 
     return (M, AL)
     
     
-def Priority1(T,E,S0):
-    return 0
-def Priority2(T,E,S1):
-    return 0
+
+#compute priority 1
+def compute_thetaD(tasks, edges, schedule, bandwidth):
+    task_vm = {tid: vm for tid, vm, _, _ in schedule}
+    task_et = {tid: ft - st for tid, _, st, ft in schedule}
+    successors = {tid: [] for tid in tasks}
+    for child, parent_map in edges.items():
+        for parent in parent_map:
+            successors[parent].append(child)
+
+    thetaD = {}
+    def dfs(tid):
+        if tid in thetaD:
+            return thetaD[tid]
+        if not successors[tid]:
+            thetaD[tid] = task_et.get(tid, 0)
+            return thetaD[tid]
+        max_path = 0
+        for succ in successors[tid]:
+            comm = edges.get(succ, {}).get(tid, 0)
+            if task_vm.get(succ) != task_vm.get(tid):
+                comm /= bandwidth
+            else:
+                comm = 0
+            max_path = max(max_path, dfs(succ) + comm + task_et.get(tid, 0))
+        thetaD[tid] = max_path
+        return thetaD[tid]
+
+    for tid in tasks:
+        dfs(tid)
+
+    filtered = [(tid, val) for tid, val in thetaD.items() if tid not in ['t_ex', 't_en']]
+    return {tid: i for i, (tid, _) in enumerate(sorted(filtered, key=lambda x: -x[1]))}
+
+# priority 2
+def compute_thetaT(AL1):
+    WST = max(ft for _, _, _, ft in AL1)
+    thetaT = {tid: WST - st for tid, _, st, _ in AL1 if tid not in ['t_ex', 't_en']}
+    return {tid: i for i, (tid, _) in enumerate(sorted(thetaT.items(), key=lambda x: -x[1]))}
+
 def CriticalTaskOptimizer(S2):
     return 0  
     
-# def best():
-#     # Comparison Logic
-# #Both Feasible: If $ WSC_s1 \leq B $ and $ WSC_s2 \leq B $, return the solution with the lower $ WST $.
-# #Both Infeasible: If $ WSC_s1 > B $ and $ WSC_s2 > B $, return the solution with the lower $ WSC $.
-# #One Feasible: If only one solution is feasible, return the feasible one (the infeasible one is discarded).
+def best(S1, S2, budget, resource_pool):
+    M1, AL1 = S1
+    M2, AL2 = S2
+    def compute_cost(M):
+        return sum(M[vm] * next(v.cost_per_interval for v in resource_pool if v.type_id == vm) for vm in M)
+    def compute_makespan(AL):
+        mspan = max(ft for _, _, _, ft in AL)
+        # print(mspan)
+        return mspan
+        
+    wsc_s1 = compute_cost(M1)
+    wsc_s2 = compute_cost(M2)
+    wst_s1 = compute_makespan(AL1)
+    wst_s2 = compute_makespan(AL2)
+    s1_feasible = wsc_s1 <= budget
+    s2_feasible = wsc_s2 <= budget
+    if s1_feasible and s2_feasible:
+        return S1 if wst_s1 <= wst_s2 else S2
+    elif not s1_feasible and not s2_feasible:
+        return S1 if wsc_s1 < wsc_s2 else S2
+    elif not s1_feasible:
+        return S2
+    else:
+        return S1
 
 #     # Determine the best solution
 #     s1_feasible = wsc_s1 <= budget
@@ -275,25 +330,45 @@ def CriticalTaskOptimizer(S2):
 #     s1_feasible = wsc_s1 <= budget
 #     s2_feasible = wsc_s2 <= budget
 
-#     if s1_feasible and s2_feasible:
-#         return (tasks_s1, vms_s1) if wst_s1 <= wst_s2 else (tasks_s2, vms_s2)
-#     elif not s1_feasible and not s2_feasible:
-#         return (tasks_s1, vms_s1) if wsc_s1 < wsc_s2 else (tasks_s2, vms_s2)
-#     elif not s1_feasible:
-#         return (tasks_s2, vms_s2)  # S2 is feasible, so it's better
-#     else:  # s2_feasible is False
-#         return (tasks_s1, vms_s1)  # S1 is feasible, so it's better
+    # if s1_feasible and s2_feasible:
+    #     return (tasks_s1, vms_s1) if wst_s1 <= wst_s2 else (tasks_s2, vms_s2)
+    # elif not s1_feasible and not s2_feasible:
+    #     return (tasks_s1, vms_s1) if wsc_s1 < wsc_s2 else (tasks_s2, vms_s2)
+    # elif not s1_feasible:
+    #     return (tasks_s2, vms_s2)  # S2 is feasible, so it's better
+    # else:  # s2_feasible is False
+    #     return (tasks_s1, vms_s1)  # S1 is feasible, so it's better
 
 #     return 0    
 
-def PACP_HEFT(T,E,R,B):
-    RTL=rtl(R)
-    S={}
-    
-    M=LeaseVM(RTL,B)
-    P0=InitializePriority(T,E,R,B)
-    S0=BuildSolution(T,E,M,P0)  
-    print(S0)
+def PACP_HEFT(T, E, R, B):
+    RTL = rtl(R)
+    S_best = None
+    while RTL:
+        M = LeaseVM(RTL, B)
+        P0 = InitializePriority(T, E, R, bandwidth)
+        S0 = BuildSolution(T, E, M, P0)
+        # print(max(ft for _, _, _, ft in S0[1]))
+        # print(S0)
+        better = True
+        while better:
+            P1 = compute_thetaD(T, E, S0[1], bandwidth)
+            S1 = best(S0, BuildSolution(T, E, M, P1), B, R)
+            if S1 != S0:
+                S0 = S1
+                # print(S0)
+                continue
+            P2 = compute_thetaT(S1[1])
+            S2 = best(S1, BuildSolution(T, E, M, P2), B, R)
+            if S2 != S0:
+                S0 = S2
+                print(S0)
+                continue
+            better = False
+        S_best = best(S0, S_best, B, R) if S_best else S0
+        RTL = RTL[1:]
+    print(max(ft for _, _, _, ft in S_best[1]))    
+
 
 
 # def PACP_HEFT(T,E,R,B):
@@ -324,11 +399,11 @@ def PACP_HEFT(T,E,R,B):
 #         RTL=RTL[1:]
         
 #     return S
-    
+
 
 
 if __name__ == "__main__":
-    dag_file_path = "CYBERSHAKE.n.50.0.dag"  # Ensure this file exists in the directory
+    dag_file_path = "CYBERSHAKE.n.100.4.dag"  # Ensure this file exists in the directory
     budget = 9  # Adjusted for CyberShake
     #time_interval = 60  # Billing interval in minutes, here constant so defined in LeaseVM function
     bandwidth = 20  # MB/s
