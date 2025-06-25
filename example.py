@@ -1,3 +1,12 @@
+import math
+
+class Task:
+    def __init__(self, id, size):
+        self.id = id
+        self.size = size
+        self.predecessors = []
+        self.successors = []
+
 # VM speeds and bandwidth
 vm_speeds = {"VM0": 2, "VM1": 1}
 bandwidth = 1  # MB/s
@@ -38,7 +47,6 @@ edges = {
 task_vm = {tid: vm for tid, vm, _, _ in initial_schedule}
 task_et = {tid: ft - st for tid, _, st, ft in initial_schedule}
 
-# Successors mapping
 task_successors = {tid: [] for tid in task_sizes}
 for child, parent_dict in edges.items():
     for parent in parent_dict:
@@ -68,10 +76,8 @@ def compute_thetaD(tid):
 for tid in task_sizes:
     compute_thetaD(tid)
 
-# Priority1 from θD
 priority1 = {tid: i for i, (tid, _) in enumerate(sorted(thetaD.items(), key=lambda x: -x[1]))}
 
-# Build AL function
 def build_AL(priority, task_sizes, edges, vm_speeds, bandwidth):
     vm_ready = {vm: 0 for vm in vm_speeds}
     task_ft = {}
@@ -111,20 +117,93 @@ def build_AL(priority, task_sizes, edges, vm_speeds, bandwidth):
 
     return AL
 
-# Build AL1 from Priority1
 AL1 = build_AL(priority1, task_sizes, edges, vm_speeds, bandwidth)
 WST1 = max(ft for _, _, _, ft in AL1)
 
-# θT from AL1
 thetaT = {tid: WST1 - st for tid, _, st, _ in AL1}
 priority2 = {tid: i for i, (tid, _) in enumerate(sorted(thetaT.items(), key=lambda x: -x[1]))}
 
-# Build AL2 from Priority2
 AL2 = build_AL(priority2, task_sizes, edges, vm_speeds, bandwidth)
 WST2 = max(ft for _, _, _, ft in AL2)
 
-# Results
-print("θD values:")
+def compute_slack_refined(AL, edges, bandwidth):
+    task_map = {tid: (vm, st, ft) for tid, vm, st, ft in AL}
+    WST = max(ft for _, _, _, ft in AL)
+    reverse_st = {}
+    reverse_ft = {tid: WST for tid in task_map}
+
+    tasks_sorted = sorted(AL, key=lambda x: -x[3])
+    fpt = {vm: WST for vm in vm_speeds}
+    succ_map = {tid: [] for tid in task_map}
+    for child, parent_map in edges.items():
+        for parent in parent_map:
+            if parent in succ_map:
+                succ_map[parent].append(child)
+
+    for tid, vm, _, _ in tasks_sorted:
+        succs = succ_map.get(tid, [])
+        min_succ_start = float('inf')
+        for succ in succs:
+            if succ not in task_map:
+                continue
+            succ_vm, succ_st, _ = task_map[succ]
+            tt = edges[succ].get(tid, 0) / bandwidth if succ_vm != vm else 0
+            min_succ_start = min(min_succ_start, reverse_st[succ] - tt)
+        min_succ_start = min(min_succ_start, fpt[vm])
+        et = task_map[tid][2] - task_map[tid][1]
+        reverse_ft[tid] = min_succ_start
+        reverse_st[tid] = min_succ_start - et
+        fpt[vm] = reverse_st[tid]
+
+    deltaT = {tid: round(reverse_st[tid] - task_map[tid][1], 2) for tid in task_map}
+    return deltaT
+
+slack = compute_slack_refined(AL2, edges, bandwidth)
+
+
+def critical_task_optimizer(AL, task_sizes, edges, vm_speeds, slack):
+    task_order = sorted(AL, key=lambda x: slack[x[0]])
+    critical_tasks = [t for t in slack if slack[t] == 0]
+    task_map = {tid: (vm, st, ft) for tid, vm, st, ft in AL}
+    WST = max(ft for _, _, _, ft in AL)
+
+    for i, (tc, _, _, _) in enumerate(task_order):
+        if tc not in critical_tasks:
+            break
+        for j in range(len(task_order)-1, i, -1):
+            tu = task_order[j][0]
+            if tu in critical_tasks:
+                continue
+            if tu in task_successors.get(tc, []) or tc in task_successors.get(tu, []):
+                continue
+            vm_tu = task_map[tu][0]
+            occupied = sorted([x for x in AL if x[1] == vm_tu], key=lambda x: x[2])
+            idle_periods = []
+            if occupied:
+                if occupied[0][2] > 0:
+                    idle_periods.append((0, occupied[0][2]))
+                for k in range(len(occupied) - 1):
+                    idle_periods.append((occupied[k][3], occupied[k+1][2]))
+                idle_periods.append((occupied[-1][3], WST))
+
+            IT = min([task_map[succ][1] - (edges.get(succ, {}).get(tc, 0) / bandwidth)
+                      for succ in task_successors.get(tc, []) if succ in task_map] + [WST])
+            OT = task_map[tc][2]
+            et = task_map[tc][2] - task_map[tc][1]
+
+            for x_u, y_u in idle_periods:
+                EST = max(x_u, IT)
+                LFT = min(y_u, OT)
+                if LFT - EST > et:
+                    task_map[tc] = (vm_tu, EST, EST + et)
+                    break
+
+    return sorted([(tid, vm, st, ft) for tid, (vm, st, ft) in task_map.items()], key=lambda x: x[2])
+
+AL3 = critical_task_optimizer(AL2, task_sizes, edges, vm_speeds, slack)
+WST3 = max(ft for _, _, _, ft in AL3)
+
+print("\nθD values:")
 for tid, val in thetaD.items():
     print(f"{tid}: {val:.2f}")
 
@@ -153,3 +232,14 @@ for tid, vm, st, ft in AL2:
     et = round(ft - st, 2)
     print(f"{tid}\t{vm}\t{st}\t{ft}\t{et}")
 print(f"→ Makespan (AL2): {WST2} seconds")
+
+print("\nSlack Time ΔT (Delta T) for Each Task:")
+for tid in sorted(slack):
+    print(f"{tid}: {slack[tid]}")
+
+print("\nAL3 (after Critical Task Optimization):")
+print("Task\tVM\tST\tFT\tET")
+for tid, vm, st, ft in AL3:
+    et = round(ft - st, 2)
+    print(f"{tid}\t{vm}\t{st}\t{ft}\t{et}")
+print(f"→ Makespan (AL3): {WST3} seconds")
