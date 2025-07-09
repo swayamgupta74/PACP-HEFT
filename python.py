@@ -186,7 +186,9 @@ def LeaseVM(RTL, budget, T=3600):  # T = 1 hour in seconds
         cost_per_hour = vm_type.cost_per_interval
         max_instances = math.floor(remaining_budget / cost_per_hour)
         if max_instances > 0:
-            for _ in range(min(max_instances, 5)):  # Limit to 5 instances per type
+            #for _ in range (min((max_instances),5)):  # Limit to 5 instances per type
+            for _ in range (max_instances):  # Limit to 5 instances per type
+    
                 M.add((vm_type.type_id, instance_id))
                 remaining_budget -= cost_per_hour
                 instance_id += 1
@@ -208,6 +210,7 @@ def BuildSolution(Tasks, Edges, M, P0, resource_pool, bandwidth=20, T=3600):
     Returns:
         Tuple (M, AL) where AL is the assignment list [(task_id, (vm_type, instance_id), ST, FT)].
     """
+
     AL = []  # Assignment list: (task_id, (vm_type, instance_id), ST, FT)
     vm_schedules = {vm_id: [] for vm_id in M}  # (vm_type, instance_id) -> list of (ST, FT)
 
@@ -365,11 +368,7 @@ def total_cost(task_map, resource_pool):
     return sum(math.ceil(max_ft / 3600.0) * next(v.cost_per_interval for v in resource_pool if v.type_id == vm_type)
                for (vm_type, idx), max_ft in vm_usage.items())
 
-# Update critical_task_optimizer to accept tasks parameter
 def critical_task_optimizer(AL, task_sizes, edges, vm_speeds, slack, reverse_st, tasks):
-    """
-    Optimize schedule by moving critical tasks to idle windows on other VMs.
-    """
     task_map = {(tid, 0): (vm, st, ft) for tid, (vm, _), st, ft in AL}
     WST = max(ft for _, _, _, ft in AL)
 
@@ -412,7 +411,7 @@ def critical_task_optimizer(AL, task_sizes, edges, vm_speeds, slack, reverse_st,
         })
     task_info.sort(key=lambda x: x['indicator'])
 
-    critical_tasks = [t['id'] for t in task_info if abs(t['delta_t']) < 1e-3]  # Relaxed to 1e-3
+    critical_tasks = [t['id'] for t in task_info if abs(t['delta_t']) < 1e0]  # 1 second slack
     task_order = [t['id'] for t in task_info]
     best_task_map = task_map.copy()
     best_makespan = WST
@@ -440,10 +439,10 @@ def critical_task_optimizer(AL, task_sizes, edges, vm_speeds, slack, reverse_st,
             idle_windows = []
             prev_ft = 0
             for t, st, ft in vm_tasks:
-                if st > prev_ft + 1e-3:  # Relaxed to 1e-3
+                if st > prev_ft + 1e0:  # 1 second tolerance
                     idle_windows.append((prev_ft, st))
                 prev_ft = ft
-            if prev_ft < WST + 1e-3:
+            if prev_ft < WST + 1e0:
                 idle_windows.append((prev_ft, WST))
 
             for window_st, window_ft in idle_windows:
@@ -511,10 +510,9 @@ def get_transitive_nodes(tid, direction='successors', task_succs=None, task_pred
     result.discard(tid)
     return result
 
-def best(S1, S2, budget, resource_pool, weight_makespan=0.9):  # Increased to 0.9
-    """
-    Select the best solution based on makespan and cost.
-    """
+def best(S1, S2, budget, resource_pool):
+    if S2 is None:
+        return S1
     M1, AL1 = S1
     M2, AL2 = S2
     
@@ -525,7 +523,7 @@ def best(S1, S2, budget, resource_pool, weight_makespan=0.9):  # Increased to 0.
         total_cost = 0
         for (vm_type, _), max_ft in vm_usage.items():
             vm_cost = next(v.cost_per_interval for v in resource_pool if v.type_id == vm_type)
-            lease_duration_hours = math.ceil(max_ft / 3600.0)
+            lease_duration_hours = math.ceil(max_ft / 3600.0)  # Time interval handled externally
             total_cost += lease_duration_hours * vm_cost
         return total_cost
     
@@ -539,13 +537,15 @@ def best(S1, S2, budget, resource_pool, weight_makespan=0.9):  # Increased to 0.
     s1_feasible = wsc_s1 <= budget
     s2_feasible = wsc_s2 <= budget
     
-    score_s1 = (weight_makespan * wst_s1 + (1 - weight_makespan) * wsc_s1) if s1_feasible else float('inf')
-    score_s2 = (weight_makespan * wst_s2 + (1 - weight_makespan) * wsc_s2) if s2_feasible else float('inf')
+    if s1_feasible and s2_feasible:
+        return S1 if wst_s1 <= wst_s2 else S2
+    elif not s1_feasible and not s2_feasible:
+        return S1 if wsc_s1 < wsc_s2 else S2
+    elif not s1_feasible:
+        return S2
+    else:
+        return S1
     
-    print(f"Score S1: {score_s1}, WST: {wst_s1}, Cost: {wsc_s1}, Feasible: {s1_feasible}")
-    print(f"Score S2: {score_s2}, WST: {wst_s2}, Cost: {wsc_s2}, Feasible: {s2_feasible}")
-    
-    return S1 if score_s1 <= score_s2 else S2
 
 def validate_schedule(AL, edges, budget, resource_pool):
     """
@@ -608,7 +608,6 @@ def print_schedule(AL, filename="schedule_output.txt"):
             f.write(f"{task_id}\t{vm_type}\t{instance_id}\t{st}\t{ft}\n")
     print(f"Schedule written to {filename}")
 
-# Update PACP_HEFT to pass tasks to critical_task_optimizer
 def PACP_HEFT(T, E, R, B):
     global tasks, P0, vm_schedules, resource_pool
     tasks = {tid: task for tid, task in T.items() if tid not in ['t_en', 't_ex']}
@@ -617,7 +616,8 @@ def PACP_HEFT(T, E, R, B):
     vm_schedules = {}
     resource_pool = R
     max_iterations = 1
-    
+    min_iterations = 1
+
     while RTL:
         M = LeaseVM(RTL, B)
         P0 = InitializePriority(tasks, E, R, bandwidth=20)
@@ -652,9 +652,8 @@ def PACP_HEFT(T, E, R, B):
                 if S1 != S0:
                     S0 = S1
                     better = True
-                    # Continue to next phase even if better
 
-            if not better:
+            if not better and iteration_count < min_iterations - 1:
                 vm_speeds = {vm.type_id: vm.processing_capacity for vm in resource_pool}
                 slack, reverse_st = compute_slack_refined(S0[1], E, bandwidth=20, vm_speeds=vm_speeds)
                 task_sizes = {tid: tasks[tid].size for tid in tasks if tid in slack}
@@ -671,7 +670,7 @@ def PACP_HEFT(T, E, R, B):
                     S0 = S3
                     better = True
 
-            iteration_count += 1  # Continue even if no improvement
+            iteration_count += 1
 
         S_best = best(S0, S_best, B, R) if S_best else S0
         RTL = RTL[1:]
@@ -683,6 +682,8 @@ def PACP_HEFT(T, E, R, B):
         print_schedule(S_best[1])
     else:
         print("Warning: No valid solution found.")
+    return S_best
+
 
 if __name__ == "__main__":
     dag_file_path = "CYBERSHAKE.n.100.4.dag"
